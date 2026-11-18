@@ -1,4 +1,4 @@
-// Token Radar's entry point (Node 22, standard library only).
+// Token Radar's entry point (Node 22, standard library only; model radar-3).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every pre-token protocol with the model in lib/model.ts, writes the
@@ -126,9 +126,17 @@ for (const name of shots) {
 }
 
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
-writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
+const dossierPath = join(out, 'dossier.json');
+writeFileSync(dossierPath, buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
+// The gate refuses a dossier past 1.5 MiB: refuse it here, with the size, rather than handing the scorer a board it must reject.
+const dossierBytes = statSync(dossierPath).size;
+if (dossierBytes > 1_572_864) {
+  process.stderr.write(`token radar: dossier.json is ${dossierBytes} bytes, over the 1.5 MiB the gate allows\n`);
+  process.exit(1);
+}
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: top row ${board[0]!.name} at $${board[0]!.implied_value_usd.toLocaleString('en-US')}, ${board.filter((r) => (r.change_7d ?? 0) >= 20).length} rows rising 20% or more in 7 days\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

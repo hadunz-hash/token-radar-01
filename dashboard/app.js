@@ -1,4 +1,4 @@
-// Token Radar's dashboard, rewritten from scratch in this session.
+// Token Radar's dashboard, rewritten from scratch in this session (model radar-3).
 //
 // It reads window.RADAR (written beside dashboard/ by main.ts) and renders
 // the ranked board, the search/category/chain filters, a per-protocol
@@ -7,7 +7,9 @@
 //
 // The page recomputes a row's implied value from the snapshot figures and
 // prints whether it matches the number board.json carries, so the page's
-// arithmetic and the board's data are visibly the same model.
+// arithmetic and the board's data are visibly the same model. The multiple
+// the page uses is the row's own multiple, already the base multiple times
+// the size factor, rounded the same way the runner rounds it.
 (function () {
   'use strict';
 
@@ -53,13 +55,17 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
 
-  // The model in one place: TVL times the calibrated multiple, times the
-  // growth multiplier, times the maturity multiplier, rounded, at least 1.
+  // The model in one place: TVL times the multiple (already the base
+  // multiple times the size factor), times the growth factor, times the
+  // maturity multiplier, rounded, at least 1. The growth factor is what
+  // keeps this board from being a TVL table: a protocol that multiplied its
+  // TVL several times over in a week is the radar's whole point, and one
+  // that shrank is cut.
   function recomputeImplied(row) {
     var m = RADAR.model;
     var change = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
     var clamped = Math.min(m.growth_cap, Math.max(m.growth_floor, change));
-    var growthMult = 1 + (clamped / 100) * m.growth_weight;
+    var growthMult = Math.min(m.growth_mult_cap, Math.max(m.growth_mult_floor, 1 + clamped / 100));
     var age = row.age_days === null || row.age_days === undefined ? m.unknown_age_days : row.age_days;
     var maturity = m.maturity_floor + (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
     return Math.max(1, Math.round(row.tvl_usd * row.multiple * growthMult * maturity));
@@ -102,8 +108,10 @@
   // ---------------------------------------------------------------- the farm plan
 
   // The farm plan is the same derivation main.ts writes to board.json:
-  // category, chains, TVL and age decide the action, the capital, the hold
-  // and every cost and time. No protocol name is special-cased.
+  // category, chains, TVL, age and seven-day growth decide the action, the
+  // capital, the hold and every cost and time. No protocol name is
+  // special-cased. The hold step follows the protocol's own momentum: add
+  // while it grows, stay small while it shrinks.
   function mainChain(p) {
     return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain';
   }
@@ -202,12 +210,22 @@
     var capital = stakeSize(p);
     var hold = holdDays(p.age_days);
     var gas = capital >= 150 ? 8 : 4;
+    var m = RADAR.model;
+    var growthPct = Math.min(m.growth_cap, Math.max(m.growth_floor, p.change_7d === null || p.change_7d === undefined ? 0 : p.change_7d));
+    var holdText;
+    if (growthPct >= 20) {
+      holdText = 'Hold the position for at least ' + hold + ' days and add to it while it is growing - ' + p.name + ' rose ' + pct(growthPct) + ' in 7 days.';
+    } else if (growthPct < 0) {
+      holdText = 'Hold the position for at least ' + hold + ' days; ' + p.name + ' fell ' + pct(growthPct) + ' in 7 days, so keep the position small and do not add.';
+    } else {
+      holdText = 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.';
+    }
     return [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
+      { text: 'Use a fresh wallet on ' + chain + ' that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: firstAction(p, capital, chain), cost: '$' + capital + ' of capital and about $' + gas + ' of gas', time: '15 minutes to set up' },
       { text: weeklyAction(p), cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+      { text: holdText, cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
+      { text: "Before you withdraw, open " + p.name + "'s own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
     ].map(formatStep);
   }
@@ -291,10 +309,23 @@
     var total = RADAR.rows.reduce(function (n, r) {
       return n + r.implied_value_usd;
     }, 0);
+    var rising = RADAR.rows.filter(function (r) {
+      return (r.change_7d === null ? 0 : r.change_7d) >= 20;
+    }).sort(function (a, b) {
+      return (b.change_7d || 0) - (a.change_7d || 0);
+    }).slice(0, 5);
+    var risingKids = [h('strong', { text: 'Rising this week: ' })];
+    rising.forEach(function (r, i) {
+      if (i > 0) risingKids.push(document.createTextNode(' \u00b7 '));
+      risingKids.push(h('b', { text: r.name }));
+      risingKids.push(document.createTextNode(' ' + pct(r.change_7d)));
+    });
     return h('section', { class: 'lede' },
       h('div', null,
         h('h1', { text: RADAR.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        h('p', { html: 'The watchlist is the floor: every protocol with at least <b>$' + Math.round(RADAR.floor_usd / 1e6) + 'M</b> of TVL and no token on record. The early radar adds <b>' + RADAR.early_size + ' pre-token protocols</b> below that floor. Implied value is a model, not a promise.' })
+        h('p', { html: 'The watchlist is the floor: every protocol with at least <b>$' + Math.round(RADAR.floor_usd / 1e6) + 'M</b> of TVL and no token on record. The early radar adds <b>' + RADAR.early_size + ' pre-token protocols</b> below that floor. Implied value is a model, not a promise.' }),
+        rising.length > 0 ? h('p', { class: 'rising' }, risingKids) : null,
+        h('p', { class: 'sub', text: 'The growth factor is what keeps this from being a TVL table: a protocol that multiplied its TVL in a week outranks a shrinking giant. A rising badge marks a protocol that grew 20% or more in seven days.' })
       ),
       h('div', { class: 'facts' },
         h('div', { class: 'fact' }, h('span', { text: 'Watchlist covered' }), h('b', { text: RADAR.watchlist_size + ' / ' + RADAR.watchlist_size })),
@@ -394,6 +425,7 @@
     list.forEach(function (r) {
       var growth = r.change_7d === null ? 'n/a' : pct(r.change_7d);
       var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
+      var rising = (r.change_7d === null ? 0 : r.change_7d) >= 20;
       var tr = h('tr', {
         'data-selected': state.selected === r.slug ? 'true' : 'false',
         tabindex: '0',
@@ -408,6 +440,7 @@
         h('td', { class: 'num', text: String(r.rank) }),
         h('td', null, h('div', { class: 'name' },
           h('b', { text: r.name }),
+          rising ? h('span', { class: 'rising-badge', title: 'TVL grew ' + pct(r.change_7d) + ' in 7 days', text: '\u25b2 Rising' }) : null,
           h('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') })
         )),
         h('td', { class: 'num', text: moneyShort(r.tvl_usd) }),
@@ -457,7 +490,7 @@
     return h('div', { class: 'panel' },
       h('div', { class: 'table-wrap' },
         h('table', null,
-          h('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their FDV/TVL ratios calibrate the multiples above.' }),
+          h('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market-cap/TVL ratios calibrate the multiples above.' }),
           h('thead', null, h('tr', null, h('th', { scope: 'col', text: 'Status' }), h('th', { scope: 'col', text: 'Protocol' }), h('th', { scope: 'col', text: 'TVL' }), h('th', { scope: 'col', text: '7d' }), h('th', { scope: 'col', text: 'Market cap' }), h('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -480,16 +513,16 @@
       h('h2', { text: 'How implied value is computed' }),
       h('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       h('div', { class: 'formula' },
-        'implied = round( tvl_usd x multiple(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
+        'implied = round( tvl_usd x (base multiple(category) x size factor) x clamp(1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, ' + m.growth_mult_floor + ', ' + m.growth_mult_cap + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      h('p', { class: 'note', text: 'The multiple is not a constant: it is the FDV/TVL the market itself pays, read off this snapshot\u2019s ' + c.live_count + ' live-token protocols. Each category\u2019s median is shrunk toward the global median (' + c.global_median + ', weight ' + m.shrink_weight + ') and clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. A category with fewer than ' + m.min_live_for_category + ' live tokens uses the global median. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      h('p', { class: 'note', text: 'The base multiple is the market-cap/TVL the market itself pays, read off this snapshot\u2019s ' + c.live_count + ' live-token protocols. Each category\u2019s median is shrunk toward the global median (' + c.global_median + ', weight ' + m.shrink_weight + ') and clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. A category with fewer than ' + m.min_live_for_category + ' live tokens uses the global median. The size factor is (' + moneyShort(m.size_ref_usd) + ' / TVL)^' + m.size_exponent + ', clamped to [' + m.size_factor_floor + ', ' + m.size_factor_cap + ']: the market pays richer multiples for earlier, smaller protocols. The growth factor is clamp(1 + 7-day growth / 100, ' + m.growth_mult_floor + ', ' + m.growth_mult_cap + '): a protocol that multiplied its TVL several times over in a week is the radar\u2019s whole point, and one that shrank is cut. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
       h('table', { class: 'calib' },
-        h('caption', { class: 'sub', text: 'Calibrated multiples, by category (top 12 by live-token count)' }),
+        h('caption', { class: 'sub', text: 'Calibrated base multiples, by category (top 12 by live-token count)' }),
         h('thead', null, h('tr', null,
           h('th', { scope: 'col', text: 'Category' }),
           h('th', { scope: 'col', text: 'Live tokens' }),
-          h('th', { scope: 'col', text: 'Median FDV/TVL' }),
-          h('th', { scope: 'col', text: 'Multiple used' })
+          h('th', { scope: 'col', text: 'Median market-cap/TVL' }),
+          h('th', { scope: 'col', text: 'Base multiple used' })
         )),
         h('tbody', null, rows)
       )
@@ -526,7 +559,9 @@
       h('h3', { text: 'Implied value' }),
       h('div', { class: 'equation' },
         h('div', null, h('span', { text: 'TVL' }), h('b', { class: 'num', text: moneyFull(row.tvl_usd) })),
-        h('div', null, h('span', { text: 'Multiple (' + (row.category || 'Other') + ')' }), h('b', { class: 'num', text: String(row.multiple) })),
+        h('div', null, h('span', { text: 'Base multiple (' + (row.category || 'Other') + ')' }), h('b', { class: 'num', text: String(row.base_multiple) })),
+        h('div', null, h('span', { text: 'Size factor' }), h('b', { class: 'num', text: String(row.size_factor) })),
+        h('div', null, h('span', { text: 'Multiple (base x size)' }), h('b', { class: 'num', text: String(row.multiple) })),
         h('div', null, h('span', { text: 'Seven-day growth' }), h('b', { class: 'num', text: pct(row.change_7d) })),
         h('div', null, h('span', { text: 'Age with no token' }), h('b', { class: 'num', text: ageLabel(row.age_days) })),
         h('div', null, h('span', { text: 'Growth multiplier' }), h('b', { class: 'num', text: String(row.growth_multiplier) })),
@@ -552,7 +587,7 @@
   }
 
   function footerNote() {
-    return h('p', { class: 'foot', text: 'Method: the board ranks protocols that record no token by an implied value computed from their TVL, seven-day growth, age with no token, and a FDV/TVL multiple calibrated on the snapshot\u2019s own live-token protocols. It does not predict whether or when a token is issued. Implied value is this entry\u2019s own claim. Snapshot ' + RADAR.as_of + ', DefiLlama protocol index, ' + RADAR.rows.length + ' rows scored.' });
+    return h('p', { class: 'foot', text: 'Method: the board ranks protocols that record no token by an implied value computed from their TVL, seven-day growth, age with no token, and a market-cap/TVL multiple calibrated on the snapshot\u2019s own live-token protocols. It does not predict whether or when a token is issued. Implied value is this entry\u2019s own claim. Snapshot ' + RADAR.as_of + ', DefiLlama protocol index, ' + RADAR.rows.length + ' rows scored.' });
   }
 
   // ---------------------------------------------------------------- render
