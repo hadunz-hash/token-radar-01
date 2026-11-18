@@ -30,6 +30,27 @@ const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
+/** A PNG's or JPEG's pixel size from its header, or null when it is neither. */
+function imageDims(path: string): { width: number; height: number } | null {
+  const buf = readFileSync(path);
+  if (buf.length >= 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let at = 2;
+    while (at + 9 < buf.length) {
+      if (buf[at] !== 0xff) return null;
+      const marker = buf[at + 1]!;
+      const len = buf.readUInt16BE(at + 2);
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { height: buf.readUInt16BE(at + 5), width: buf.readUInt16BE(at + 7) };
+      }
+      at += 2 + len;
+    }
+  }
+  return null;
+}
+
 /** --name <value> out of the arguments, or the fallback. */
 function arg(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
@@ -82,6 +103,24 @@ if (shots.length < 3) {
 for (const name of shots) {
   if (!IMAGE_NAME.test(name)) {
     process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
+    process.exit(1);
+  }
+  // The gate refuses a screenshot past 512 KiB or with a long side past 1440
+  // px or a short side under 800 px: refuse it here, with the reason, rather
+  // than handing the scorer a board it must reject.
+  const shotPath = join(out, 'screenshots', name);
+  const dims = imageDims(shotPath);
+  if (dims === null) {
+    process.stderr.write(`token radar: screenshots/${name}: not a whole PNG or JPEG\n`);
+    process.exit(1);
+  }
+  const bytes = statSync(shotPath).size;
+  if (bytes > SCREENSHOT_CAPS.max_bytes) {
+    process.stderr.write(`token radar: screenshots/${name} is ${bytes} bytes, over the ${SCREENSHOT_CAPS.max_bytes} the gate allows\n`);
+    process.exit(1);
+  }
+  if (Math.max(dims.width, dims.height) > 1440 || Math.min(dims.width, dims.height) < 800) {
+    process.stderr.write(`token radar: screenshots/${name} is ${dims.width}x${dims.height}: the long side must be at most 1440 and the short side at least 800\n`);
     process.exit(1);
   }
 }
