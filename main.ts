@@ -1,4 +1,4 @@
-// Token Radar's entry point (Node 22, standard library only; model radar-3).
+// Token Radar's entry point (Node 22, standard library only; model radar-4).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every pre-token protocol with the model in lib/model.ts, writes the
@@ -11,7 +11,7 @@
 // dashboard/index.html, dashboard/app.css and dashboard/app.js read the
 // data.js this program writes. Keep the gate's shape: board.json holds every
 // watchlist slug, ranks 1..N, implied values that never rise with rank, and
-// 3..12 farm steps per row; the dossier is rebuilt byte for byte by the
+// exactly 6 farm steps per row; the dossier is rebuilt byte for byte by the
 // scorer, so this program writes exactly what buildDossier writes.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
@@ -138,5 +138,6 @@ if (dossierBytes > 1_572_864) {
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: top row ${board[0]!.name} at $${board[0]!.implied_value_usd.toLocaleString('en-US')}, ${board.filter((r) => (r.change_7d ?? 0) >= 20).length} rows rising 20% or more in 7 days\n` +
+    `token radar: verdicts FARM ${radar.validation.verdicts.farm} / MARGINAL ${radar.validation.verdicts.marginal} / SKIP ${radar.validation.verdicts.skip} at $${radar.model.deposit_usd.toLocaleString('en-US')}; size curve LOO miss x${radar.validation.fit.loo_median.toFixed(2)} (flat x${radar.validation.fit.loo_flat_median.toFixed(2)}), launch odds pi ${radar.validation.odds.pi.toFixed(2)} half-life ${radar.validation.odds.half_life_days} days\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
