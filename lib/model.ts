@@ -1,4 +1,4 @@
-// Token Radar's model (radar-4): one sealed snapshot in, one ranked board out.
+// Token Radar's model (radar-5): one sealed snapshot in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a
 // ceiling) and adds the early radar: every pre-token protocol the watchlist
@@ -11,19 +11,27 @@
 // Implied value follows only from the snapshot's own figures, through a
 // fitted curve, not a hand-picked multiple:
 //
-//   sizeCurve   = the log-log line log10(market cap) = a + b x log10(TVL),
-//                 fitted by least squares on the snapshot's own traded
-//                 protocols (128 of them). No coefficient is hardcoded: the
-//                 fit is computed from the snapshot at every run.
-//   ifLaunched  = sizeCurve(TVL) x growthCarry, the value if the protocol
-//                 launched a token at the market's own pricing.
-//   growthCarry = clamp(1 + (clamp(change_7d, -70, 500) - marketGrowth) / 100,
-//                 0.30, 5.00), where marketGrowth is the median seven-day
-//                 change of every protocol in the snapshot. A protocol that
-//                 outgrew the market carries that momentum forward; one that
-//                 shrank is cut. The carry is a PROJECTION, not a fit: it is
-//                 labelled as one wherever it appears, because adding growth
-//                 to the fitted curve itself loses both out-of-sample tests.
+//   sizeCurve   = log10(market cap) = a + b x log10(TVL) + c x log10(TVL)^2
+//                 + d x log10(1 + 7d change), fitted by least squares on the
+//                 snapshot's own traded protocols WITH a listing date (95 of
+//                 them). No coefficient is hardcoded: the fit is computed
+//                 from the snapshot at every run. The 33 traded protocols
+//                 with no listing date are left out: legacy products (Aave
+//                 V2, Lido, SSV, the big bridges) whose token covers other
+//                 products or predates listing records — their market-cap/TVL
+//                 ratios span 0.00–18.96 and one in three misses the curve
+//                 by 10x, so they do not price a new token. The growth
+//                 feature is winsorized to the range those 95 show (7d
+//                 change -40% to +27% here), so no board row is priced on
+//                 growth beyond what the data has seen.
+//   ifLaunched  = sizeCurve(TVL, 7d change), the value if the protocol
+//                 launched a token at the market's own pricing. The growth
+//                 coefficient d is NEGATIVE: the protocols whose TVL surged
+//                 hardest trade at the lowest market cap for their size — a
+//                 surge is usually deposits chasing yield, not a re-rating.
+//                 The old positive carry assumed the surge would persist;
+//                 the tests below say otherwise, so the carry is gone and
+//                 growth lives inside the fit, where it is tested.
 //   launchOdds  = the share of protocols this old with no token that ever
 //                 launch one, from a survival model fitted on the 383 dated
 //                 protocols that stand alone like the board's rows (bridges,
@@ -42,13 +50,16 @@
 //                 the leave-one-out residuals of the size curve.
 //
 // Every claim the dashboard prints about the model is computed from the
-// snapshot at run time and validated out of sample, two ways: leave-one-out
-// (each traded token priced from a fit that never saw it) and a time split
-// (the older half of the traded tokens fits, the newer half is predicted).
-// Terms that do not win both tests are dropped and the dashboard says so:
-// growth inside the fit, chain count, age inside the fit, and a category
-// premium all fail at least one test. A protocol that records no token is
-// described as recording none, never as having none: the record is not proof.
+// snapshot at run time and validated out of sample, three ways: leave-one-out
+// (each traded token priced from a fit that never saw it), a time split (the
+// older half of the traded tokens fits, the newer half is predicted) and a
+// 900-day split (protocols listed at least 900 days ago fit, the younger
+// ones — the board's own population — are predicted). A term stays only if
+// adding it to the spec does not lose any of the three tests: the quadratic
+// size term and growth inside the fit both stay; chain count, age inside
+// the fit, and a category premium all fail at least one test and the
+// dashboard says so. A protocol that records no token is described as
+// recording none, never as having none: the record is not proof.
 //
 // A row's farm verdict follows from the same numbers, at a $1,000 deposit,
 // a 7% drop share and a 4% T-bill yield unless the reader changes them:
@@ -92,8 +103,6 @@ export interface Snapshot {
 export interface ModelConstants {
   growth_floor: number;
   growth_cap: number;
-  carry_floor: number;
-  carry_cap: number;
   unknown_age_days: number;
   deposit_usd: number;
   deposit_options: number[];
@@ -109,8 +118,6 @@ export interface ModelConstants {
 export const MODEL: ModelConstants = {
   growth_floor: -70,
   growth_cap: 500,
-  carry_floor: 0.3,
-  carry_cap: 5.0,
   unknown_age_days: 365,
   deposit_usd: 1000,
   deposit_options: [1000, 5000, 25000],
@@ -124,36 +131,49 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
-
-/** How many live-token protocols the Live token view carries, by market cap. */
-export const LIVE_ROWS = 24;
+export const MODEL_VERSION = 'radar-5';
 
 /** A protocol counts as rising when its TVL grew at least this much in 7 days. */
 export const RISING_PCT = 20;
 
-/** One out-of-sample test of a value term: leave-one-out and time-split median misses. */
+/** One out-of-sample test of a value term: leave-one-out, time split and 900-day split median misses. */
 export interface TermTest {
   term: string;
   loo_median: number;
   time_median: number;
+  split900_median: number;
   kept: boolean;
   note: string;
 }
 
-/** The fitted size curve and the two tests that validate it. */
+/**
+ * The fitted size curve and the three tests that validate it. The fit runs
+ * on the dated traded protocols only: the 33 traded protocols with no
+ * listing date are legacy products (Aave V2, Lido, SSV, the big bridges)
+ * whose token covers other products or predates listing records — their
+ * market-cap/TVL ratios span 0.00–18.96 and one in three misses the curve
+ * by 10x, so they do not price a new token. `excluded_undated` counts them.
+ */
 export interface SizeFit {
   comps: number;
+  excluded_undated: number;
   intercept: number;
   slope: number;
+  quad: number;
+  growth_coef: number;
+  growth_feat_lo: number;
+  growth_feat_hi: number;
   flat_median: number;
   market_growth: number;
   loo_median: number;
   loo_p75: number;
   loo_flat_median: number;
   loo_flat_p75: number;
+  within3: number;
   time_median: number;
   time_flat_median: number;
+  split900_median: number;
+  split900_flat_median: number;
   range_lo_factor: number;
   range_hi_factor: number;
   range_hold: number;
@@ -169,7 +189,13 @@ export interface OddsBucket {
   predicted_no_token: number;
 }
 
-/** The fitted launch-odds curve and its calibration. */
+/** The fitted launch-odds curve and its calibration. `brier` scores the
+ * curve's no-token probability against the base rate (`brier_base`) on the
+ * dated protocols; `loo_brier` is the same score with each protocol held
+ * out and the curve refit without it (coarser grid, for speed).
+ * `accuracy` is the share called right at a 50% threshold — the base rate
+ * (`accuracy_base`) is what guessing "no token" for every protocol scores,
+ * so the odds add calibration, not classification. */
 export interface OddsFit {
   dated: number;
   pi: number;
@@ -177,6 +203,12 @@ export interface OddsFit {
   half_life_days: number;
   buckets: OddsBucket[];
   time_split: OddsBucket[];
+  brier: number;
+  brier_base: number;
+  loo_brier: number;
+  loo_brier_base: number;
+  accuracy: number;
+  accuracy_base: number;
 }
 
 /** How the 758 protocols split between ranked and set aside, each for one reason. */
@@ -234,6 +266,7 @@ export interface BoardRow {
   launch_odds: number;
   range_lo_usd: number;
   range_hi_usd: number;
+  /** The fitted growth factor (kept under its old field name): 10^(growth coefficient x winsorized growth feature). Below 1 for a protocol whose TVL just surged. */
   growth_carry: number;
   hold_days: number;
   farm_chain: string;
@@ -273,6 +306,7 @@ export interface RadarRow {
   launch_odds: number;
   range_lo_usd: number;
   range_hi_usd: number;
+  /** The fitted growth factor (kept under its old field name). */
   growth_carry: number;
   hold_days: number;
   farm_chain: string;
@@ -415,6 +449,10 @@ function olsPredict(beta: number[], features: ((p: SnapshotProtocol) => number)[
 }
 
 const logTvl = (p: SnapshotProtocol): number => Math.log10(Math.max(1, p.tvl_usd));
+const quadTvl = (p: SnapshotProtocol): number => {
+  const lt = logTvl(p);
+  return lt * lt;
+};
 const growthFeat = (p: SnapshotProtocol): number => {
   const g = finite(p.change_7d, 0);
   return Math.log10(1 + Math.max(-0.9, Math.min(9, g / 100)));
@@ -428,6 +466,11 @@ const ageFeat = (p: SnapshotProtocol, asOf: string): number => {
 /** The traded protocols: a market cap and a TVL, both positive. */
 function tradedComps(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
   return protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+}
+
+/** The traded protocols with a recorded listing date: the fit's population. */
+function datedComps(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  return tradedComps(protocols).filter((p) => p.listed_at !== null);
 }
 
 /** Leave-one-out median and p75 miss of a feature set, plus the log residuals. */
@@ -457,6 +500,32 @@ function timeSplitTest(comps: SnapshotProtocol[], features: ((p: SnapshotProtoco
   return medianOf(misses);
 }
 
+/**
+ * 900-day split median miss: protocols listed at least 900 days ago fit,
+ * the younger ones are predicted. The young cohort is the board's own
+ * population — a pre-token protocol is usually young — so this is the
+ * hardest of the three tests and the one that kills age and sector terms.
+ */
+function split900Test(comps: SnapshotProtocol[], features: ((p: SnapshotProtocol) => number)[], asOf: string): number {
+  const dated = comps.filter((p) => p.listed_at !== null);
+  const old = dated.filter((p) => ageDays(asOf, p.listed_at)! >= 900);
+  const young = dated.filter((p) => ageDays(asOf, p.listed_at)! < 900);
+  const beta = olsFit(old, features);
+  const misses = young.map((p) => missOf(olsPredict(beta, features, p), p.mcap_usd!)).sort((a, b) => a - b);
+  return medianOf(misses);
+}
+
+/** 900-day split median miss of the flat multiple (the old cohort's median prices the young one). */
+function split900FlatTest(comps: SnapshotProtocol[], asOf: string): number {
+  const dated = comps.filter((p) => p.listed_at !== null);
+  const old = dated.filter((p) => ageDays(asOf, p.listed_at)! >= 900);
+  const young = dated.filter((p) => ageDays(asOf, p.listed_at)! < 900);
+  const ratios = old.map((p) => p.mcap_usd! / p.tvl_usd).sort((a, b) => a - b);
+  const med = medianOf(ratios);
+  const misses = young.map((p) => missOf(med * p.tvl_usd, p.mcap_usd!)).sort((a, b) => a - b);
+  return medianOf(misses);
+}
+
 /** Leave-one-out median miss of the flat multiple (the median market-cap/TVL, refit each fold). */
 function looFlatTest(comps: SnapshotProtocol[]): { median: number; p75: number } {
   const misses: number[] = [];
@@ -482,20 +551,20 @@ function timeSplitFlatTest(comps: SnapshotProtocol[]): number {
   return medianOf(misses);
 }
 
-/** Leave-one-out median miss with a shrunk category premium on the log residuals (min 3 comps). */
-function looCategoryTest(comps: SnapshotProtocol[]): number {
+/** Leave-one-out median miss with a shrunk category premium on the log residuals (min 3 comps), on top of `features`. */
+function looCategoryTest(comps: SnapshotProtocol[], features: ((p: SnapshotProtocol) => number)[]): number {
   const misses: number[] = [];
   for (let i = 0; i < comps.length; i++) {
     const rest = comps.filter((_, j) => j !== i);
-    const beta = olsFit(rest, [logTvl]);
+    const beta = olsFit(rest, features);
     const p = comps[i]!;
     let premium = 0;
     const same = rest.filter((q) => (q.category ?? 'Other') === (p.category ?? 'Other'));
     if (same.length >= 3) {
-      const res = same.map((q) => Math.log10(q.mcap_usd!) - (beta[0]! + beta[1]! * Math.log10(q.tvl_usd))).sort((a, b) => a - b);
+      const res = same.map((q) => Math.log10(q.mcap_usd!) - Math.log10(olsPredict(beta, features, q))).sort((a, b) => a - b);
       premium = 0.5 * medianOf(res);
     }
-    const pred = 10 ** (beta[0]! + beta[1]! * Math.log10(p.tvl_usd) + premium);
+    const pred = 10 ** (Math.log10(olsPredict(beta, features, p)) + premium);
     misses.push(missOf(pred, p.mcap_usd!));
   }
   misses.sort((a, b) => a - b);
@@ -503,36 +572,77 @@ function looCategoryTest(comps: SnapshotProtocol[]): number {
 }
 
 /** Time-split median miss with the same shrunk category premium. */
-function timeSplitCategoryTest(comps: SnapshotProtocol[]): number {
+function timeSplitCategoryTest(comps: SnapshotProtocol[], features: ((p: SnapshotProtocol) => number)[]): number {
   const dated = comps.filter((p) => p.listed_at !== null).sort((a, b) => (a.listed_at! < b.listed_at! ? -1 : 1));
   const half = Math.floor(dated.length / 2);
   const old = dated.slice(0, half);
   const recent = dated.slice(half);
-  const beta = olsFit(old, [logTvl]);
+  const beta = olsFit(old, features);
   const misses = recent.map((p) => {
     let premium = 0;
     const same = old.filter((q) => (q.category ?? 'Other') === (p.category ?? 'Other'));
     if (same.length >= 3) {
-      const res = same.map((q) => Math.log10(q.mcap_usd!) - (beta[0]! + beta[1]! * Math.log10(q.tvl_usd))).sort((a, b) => a - b);
+      const res = same.map((q) => Math.log10(q.mcap_usd!) - Math.log10(olsPredict(beta, features, q))).sort((a, b) => a - b);
       premium = 0.5 * medianOf(res);
     }
-    return missOf(10 ** (beta[0]! + beta[1]! * Math.log10(p.tvl_usd) + premium), p.mcap_usd!);
+    return missOf(10 ** (Math.log10(olsPredict(beta, features, p)) + premium), p.mcap_usd!);
+  }).sort((a, b) => a - b);
+  return medianOf(misses);
+}
+
+/** 900-day split median miss with the same shrunk category premium. */
+function split900CategoryTest(comps: SnapshotProtocol[], features: ((p: SnapshotProtocol) => number)[], asOf: string): number {
+  const dated = comps.filter((p) => p.listed_at !== null);
+  const old = dated.filter((p) => ageDays(asOf, p.listed_at)! >= 900);
+  const young = dated.filter((p) => ageDays(asOf, p.listed_at)! < 900);
+  const beta = olsFit(old, features);
+  const misses = young.map((p) => {
+    let premium = 0;
+    const same = old.filter((q) => (q.category ?? 'Other') === (p.category ?? 'Other'));
+    if (same.length >= 3) {
+      const res = same.map((q) => Math.log10(q.mcap_usd!) - Math.log10(olsPredict(beta, features, q))).sort((a, b) => a - b);
+      premium = 0.5 * medianOf(res);
+    }
+    return missOf(10 ** (Math.log10(olsPredict(beta, features, p)) + premium), p.mcap_usd!);
   }).sort((a, b) => a - b);
   return medianOf(misses);
 }
 
 /** The fitted size curve and every term the model tested and kept or dropped. */
 export function fitSizeCurve(protocols: SnapshotProtocol[], asOf: string): SizeFit {
-  const comps = tradedComps(protocols);
+  const traded = tradedComps(protocols);
+  // The fit runs on the dated traded protocols only. The 33 traded
+  // protocols with no listing date are legacy products (Aave V2, Lido, SSV,
+  // the big bridges) whose token covers other products or predates listing
+  // records: their market-cap/TVL ratios span 0.00–18.96 and one in three
+  // misses the curve by 10x, so they do not price a new token.
+  const comps = datedComps(protocols);
   const changes = protocols.map((p) => p.change_7d).filter((c): c is number => typeof c === 'number' && Number.isFinite(c)).sort((a, b) => a - b);
   const marketGrowth = changes.length > 0 ? medianOf(changes) : 0;
   const ratios = comps.map((p) => p.mcap_usd! / p.tvl_usd).sort((a, b) => a - b);
   const flatMedian = ratios.length > 0 ? medianOf(ratios) : 0.17;
-  const beta = olsFit(comps, [logTvl]);
-  const loo = looTest(comps, [logTvl]);
+  // The kept spec: log TVL, its square, and 7-day growth inside the fit.
+  // Growth's fitted coefficient is NEGATIVE: the protocols whose TVL surged
+  // hardest trade at the lowest market cap for their size — a surge is
+  // usually deposits chasing yield, not a re-rating. The old positive carry
+  // assumed the surge would persist; the three tests below say otherwise.
+  // The growth feature is winsorized to the range the comparables show
+  // (7d change -40% to +27% here): no board row is priced on growth beyond
+  // what the data has seen, so a -73% week prices like -40% and a +4449%
+  // week like +27%, instead of extrapolating to a 25x or a 0.003x factor.
+  const growthLo = Math.min(...comps.map((p) => growthFeat(p)));
+  const growthHi = Math.max(...comps.map((p) => growthFeat(p)));
+  const growthCapped = (p: SnapshotProtocol): number => Math.min(growthHi, Math.max(growthLo, growthFeat(p)));
+  const kept: ((p: SnapshotProtocol) => number)[] = [logTvl, quadTvl, growthCapped];
+  const beta = olsFit(comps, kept);
+  const loo = looTest(comps, kept);
   const looFlat = looFlatTest(comps);
-  const timeMedian = timeSplitTest(comps, [logTvl]);
+  const timeMedian = timeSplitTest(comps, kept);
   const timeFlat = timeSplitFlatTest(comps);
+  const split900 = split900Test(comps, kept, asOf);
+  const split900Flat = split900FlatTest(comps, asOf);
+  const log3 = Math.log10(3);
+  const within3 = loo.residuals.filter((r) => Math.abs(r) <= log3).length / comps.length;
   const q25 = quantileOf(loo.residuals, 0.25);
   const q75 = quantileOf(loo.residuals, 0.75);
   const loFactor = 10 ** q25;
@@ -540,69 +650,100 @@ export function fitSizeCurve(protocols: SnapshotProtocol[], asOf: string): SizeF
   let inside = 0;
   for (let i = 0; i < comps.length; i++) {
     const rest = comps.filter((_, j) => j !== i);
-    const b = olsFit(rest, [logTvl]);
-    const pred = 10 ** (b[0]! + b[1]! * Math.log10(comps[i]!.tvl_usd));
+    const b = olsFit(rest, kept);
+    const pred = olsPredict(b, kept, comps[i]!);
     const actual = comps[i]!.mcap_usd!;
     if (actual >= pred * loFactor && actual <= pred * hiFactor) inside++;
   }
   const ageF = (p: SnapshotProtocol): number => ageFeat(p, asOf);
-  const growthLoo = looTest(comps, [logTvl, growthFeat]);
-  const growthTime = timeSplitTest(comps, [logTvl, growthFeat]);
-  const chainsLoo = looTest(comps, [logTvl, chainsFeat]);
-  const chainsTime = timeSplitTest(comps, [logTvl, chainsFeat]);
-  const ageLoo = looTest(comps, [logTvl, ageF]);
-  const ageTime = timeSplitTest(comps, [logTvl, ageF]);
-  const catLoo = looCategoryTest(comps);
-  const catTime = timeSplitCategoryTest(comps);
+  const quad = [logTvl, quadTvl];
+  const linLoo = looTest(comps, [logTvl]);
+  const linTime = timeSplitTest(comps, [logTvl]);
+  const lin900 = split900Test(comps, [logTvl], asOf);
+  const quadLoo = looTest(comps, quad);
+  const quadTime = timeSplitTest(comps, quad);
+  const quad900 = split900Test(comps, quad, asOf);
+  const chainsSpec = [...kept, chainsFeat];
+  const chainsLoo = looTest(comps, chainsSpec);
+  const chainsTime = timeSplitTest(comps, chainsSpec);
+  const chains900 = split900Test(comps, chainsSpec, asOf);
+  const ageSpec = [...kept, ageF];
+  const ageLoo = looTest(comps, ageSpec);
+  const ageTime = timeSplitTest(comps, ageSpec);
+  const age900 = split900Test(comps, ageSpec, asOf);
+  const catLoo = looCategoryTest(comps, kept);
+  const catTime = timeSplitCategoryTest(comps, kept);
+  const cat900 = split900CategoryTest(comps, kept, asOf);
   const terms: TermTest[] = [
     {
       term: 'size curve (log TVL)',
-      loo_median: round2(loo.median),
-      time_median: round2(timeMedian),
+      loo_median: round2(linLoo.median),
+      time_median: round2(linTime),
+      split900_median: round2(lin900),
       kept: true,
-      note: 'the fit itself: beats the flat multiple on both tests',
+      note: 'the fit itself: beats the flat multiple on all three tests',
+    },
+    {
+      term: 'quadratic size term',
+      loo_median: round2(quadLoo.median),
+      time_median: round2(quadTime),
+      split900_median: round2(quad900),
+      kept: true,
+      note: 'on its own it trades leave-one-out for the time split — it stays because with growth the pair beats the straight line on all three tests',
     },
     {
       term: '7-day growth inside the fit',
-      loo_median: round2(growthLoo.median),
-      time_median: round2(growthTime),
-      kept: false,
-      note: 'loses leave-one-out, wins the time split: kept out of the fit, used as a labelled carry instead',
+      loo_median: round2(loo.median),
+      time_median: round2(timeMedian),
+      split900_median: round2(split900),
+      kept: true,
+      note: 'wins all three tests against the straight line — with a negative coefficient, so a TVL surge prices a token down, not up',
     },
     {
       term: 'chain count',
       loo_median: round2(chainsLoo.median),
       time_median: round2(chainsTime),
+      split900_median: round2(chains900),
       kept: false,
-      note: 'loses leave-one-out; more chains do not price a token better',
+      note: 'loses all three tests on top of the kept spec; more chains do not price a token better',
     },
     {
       term: 'age inside the fit',
       loo_median: round2(ageLoo.median),
       time_median: round2(ageTime),
+      split900_median: round2(age900),
       kept: false,
-      note: 'loses leave-one-out; age belongs in the launch odds, not in the value',
+      note: 'wins leave-one-out and the time split but loses the 900-day split badly; age belongs in the launch odds, not in the value',
     },
     {
       term: 'category premium',
       loo_median: round2(catLoo),
       time_median: round2(catTime),
+      split900_median: round2(cat900),
       kept: false,
-      note: 'loses leave-one-out: a category median does not travel to a new token',
+      note: 'wins leave-one-out but loses both time splits: a category median does not travel to a new token',
     },
   ];
   return {
     comps: comps.length,
+    excluded_undated: traded.length - comps.length,
     intercept: round4(beta[0]!),
     slope: round4(beta[1]!),
+    quad: round4(beta[2]!),
+    growth_coef: round4(beta[3]!),
+    growth_feat_lo: round4(growthLo),
+    growth_feat_hi: round4(growthHi),
     flat_median: round4(flatMedian),
     market_growth: round2(marketGrowth),
     loo_median: round2(loo.median),
     loo_p75: round2(loo.p75),
     loo_flat_median: round2(looFlat.median),
     loo_flat_p75: round2(looFlat.p75),
+    within3: round2(within3),
     time_median: round2(timeMedian),
     time_flat_median: round2(timeFlat),
+    split900_median: round2(split900),
+    split900_flat_median: round2(split900Flat),
     range_lo_factor: round2(loFactor),
     range_hi_factor: round2(hiFactor),
     range_hold: round2(inside / comps.length),
@@ -628,6 +769,26 @@ function fitSurvival(dated: { age: number; hasToken: boolean }[]): { pi: number;
   let bestLambda = 0.0008;
   let bestNll = Number.POSITIVE_INFINITY;
   for (let pi100 = 5; pi100 <= 79; pi100++) {
+    const pi = pi100 / 100;
+    for (const lambda of lambdas) {
+      const nll = survivalNll(dated, pi, lambda);
+      if (nll < bestNll) {
+        bestNll = nll;
+        bestPi = pi;
+        bestLambda = lambda;
+      }
+    }
+  }
+  return { pi: bestPi, lambda: bestLambda };
+}
+
+/** The same fit on a coarser grid, for the leave-one-out Brier: 383 refits. */
+function fitSurvivalCoarse(dated: { age: number; hasToken: boolean }[]): { pi: number; lambda: number } {
+  const lambdas = [0.0002, 0.0005, 0.0008, 0.001, 0.002, 0.003, 0.005];
+  let bestPi = 0.5;
+  let bestLambda = 0.0008;
+  let bestNll = Number.POSITIVE_INFINITY;
+  for (let pi100 = 10; pi100 <= 90; pi100 += 2) {
     const pi = pi100 / 100;
     for (const lambda of lambdas) {
       const nll = survivalNll(dated, pi, lambda);
@@ -700,6 +861,33 @@ export function fitOdds(protocols: SnapshotProtocol[], asOf: string): OddsFit {
     const predicted = inBucket.length > 0 ? inBucket.reduce((s, d) => s + survivalNoToken(d.age, oldFit.pi, oldFit.lambda), 0) / inBucket.length : 0;
     return { lo_days: lo, hi_days: hi, n: inBucket.length, actual_no_token: round2(actual), predicted_no_token: round2(predicted) };
   });
+  // Brier score of the curve's no-token probability against the base rate,
+  // in sample and leave-one-out. Accuracy at a 50% threshold is also
+  // reported — it ties the base rate, because four in five dated protocols
+  // have no token: the odds add calibration across ages, not classification.
+  const baseRate = dated.length > 0 ? dated.filter((d) => !d.hasToken).length / dated.length : 0;
+  let brier = 0;
+  let brierBase = 0;
+  let correct = 0;
+  for (const d of dated) {
+    const pNo = survivalNoToken(d.age, pi, lambda);
+    const y = d.hasToken ? 0 : 1;
+    brier += (pNo - y) * (pNo - y);
+    brierBase += (baseRate - y) * (baseRate - y);
+    if ((pNo >= 0.5) === (y === 1)) correct++;
+  }
+  let looBrier = 0;
+  let looBrierBase = 0;
+  for (let i = 0; i < dated.length; i++) {
+    const rest = dated.filter((_, j) => j !== i);
+    const refit = fitSurvivalCoarse(rest);
+    const d = dated[i]!;
+    const pNo = survivalNoToken(d.age, refit.pi, refit.lambda);
+    const y = d.hasToken ? 0 : 1;
+    looBrier += (pNo - y) * (pNo - y);
+    looBrierBase += (baseRate - y) * (baseRate - y);
+  }
+  const n = dated.length;
   return {
     dated: dated.length,
     pi: round2(pi),
@@ -707,6 +895,12 @@ export function fitOdds(protocols: SnapshotProtocol[], asOf: string): OddsFit {
     half_life_days: Math.round(halfLife),
     buckets,
     time_split: timeSplit,
+    brier: round4(n > 0 ? brier / n : 0),
+    brier_base: round4(n > 0 ? brierBase / n : 0),
+    loo_brier: round4(n > 0 ? looBrier / n : 0),
+    loo_brier_base: round4(n > 0 ? looBrierBase / n : 0),
+    accuracy: round4(n > 0 ? correct / n : 0),
+    accuracy_base: round4(Math.max(baseRate, 1 - baseRate)),
   };
 }
 
@@ -716,10 +910,10 @@ export function launchOddsFor(age: number | null, odds: OddsFit): number {
   return Math.min(0.99, Math.max(0.01, survivalOdds(age, odds.pi, odds.lambda_per_day)));
 }
 
-/** The growth carry: a projection of one more week like this one, relative to the market. */
-export function growthCarryFor(change7d: number | null, marketGrowth: number, model: ModelConstants): number {
-  const g = Math.min(model.growth_cap, Math.max(model.growth_floor, finite(change7d, 0)));
-  return Math.min(model.carry_cap, Math.max(model.carry_floor, 1 + (g - marketGrowth) / 100));
+/** The fitted growth factor of a protocol: 10^(growth coefficient x growth feature), with the feature winsorized to the range the comparables show — the fit never prices a board row on growth beyond what the data has seen. */
+export function growthFactorFor(p: SnapshotProtocol, fit: SizeFit): number {
+  const f = Math.min(fit.growth_feat_hi, Math.max(fit.growth_feat_lo, growthFeat(p)));
+  return 10 ** (fit.growth_coef * f);
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -972,9 +1166,13 @@ export function buildBoard(
 
   const scored = [...chosen.values()].map((p) => {
     const age = ageDays(snapshot.as_of, p.listed_at);
-    const ifLaunchedRaw = 10 ** (sizeFit.intercept + sizeFit.slope * Math.log10(Math.max(1, p.tvl_usd)));
-    const carry = growthCarryFor(p.change_7d, sizeFit.market_growth, model);
-    const ifLaunched = Math.max(1, Math.round(ifLaunchedRaw * carry));
+    const logTvl = Math.log10(Math.max(1, p.tvl_usd));
+    // The size curve at zero growth, times the fitted growth factor. The
+    // factor is below 1 for a protocol whose TVL just surged and above 1
+    // for one whose TVL fell: the fit prices surges down, not up.
+    const ifLaunchedRaw = 10 ** (sizeFit.intercept + sizeFit.slope * logTvl + sizeFit.quad * logTvl * logTvl);
+    const growthFactor = growthFactorFor(p, sizeFit);
+    const ifLaunched = Math.max(1, Math.round(ifLaunchedRaw * growthFactor));
     const oddsValue = launchOddsFor(age, oddsFit);
     const implied = Math.max(1, Math.round(ifLaunched * oddsValue));
     const rangeLo = Math.max(1, Math.round(implied * sizeFit.range_lo_factor));
@@ -983,7 +1181,7 @@ export function buildBoard(
     const { chain, gas } = farmChainFor(p, model);
     const v = verdictFor(ifLaunched, oddsValue, p.tvl_usd, hold, gas, model);
     const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, finite(p.change_7d, 0)));
-    return { p, age, ifLaunched, carry, oddsValue, implied, rangeLo, rangeHi, hold, chain, gas, v, growthPct };
+    return { p, age, ifLaunched, growthFactor, oddsValue, implied, rangeLo, rangeHi, hold, chain, gas, v, growthPct };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const board = scored.map((s, i) => ({
@@ -1006,7 +1204,7 @@ export function buildBoard(
     launch_odds: round4(s.oddsValue),
     range_lo_usd: s.rangeLo,
     range_hi_usd: s.rangeHi,
-    growth_carry: round4(s.carry),
+    growth_carry: round4(s.growthFactor),
     hold_days: s.hold,
     farm_chain: s.chain,
     gas_usd: s.gas,
@@ -1029,12 +1227,11 @@ export function buildBoard(
   return { board, fit: sizeFit, odds: oddsFit, coverage };
 }
 
-/** The live-token protocols, by market cap, for the dashboard's Live token view. */
+/** The live-token protocols, by market cap, for the dashboard's Live token view: all of them, not a top slice. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
     .filter((p) => !isPreToken(p) && p.category !== 'CEX')
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
-    .slice(0, LIVE_ROWS)
     .map((p) => ({
       slug: p.slug,
       name: p.name,
@@ -1100,8 +1297,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    comps: snapshot.protocols
-      .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    comps: datedComps(snapshot.protocols)
       .map((p) => ({ tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! })),
     rows: board.map(radarRow),
     live,

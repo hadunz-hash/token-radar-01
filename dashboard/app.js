@@ -1,4 +1,4 @@
-/* Token Radar — radar-4. Dense terminal board: every pre-token protocol priced
+/* Token Radar — radar-5. Dense terminal board: every pre-token protocol priced
    from the snapshot, with the farm verdict costed out. Reads window.RADAR. */
 (function () {
   'use strict';
@@ -61,6 +61,16 @@
   }
 
   /* --- farm plan, mirroring lib/model.ts farmSteps --- */
+  function shortPlan(r) {
+    var c = (r.category || '').toLowerCase();
+    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Supply';
+    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) return 'Provide liquidity';
+    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0 || c.indexOf('basis trad') >= 0) return 'Open a position';
+    if (c.indexOf('bridge') >= 0) return 'Bridge';
+    if (c.indexOf('prediction') >= 0) return 'Take a position';
+    if (c.indexOf('governance') >= 0) return 'Stake and vote';
+    return 'Deposit';
+  }
   function actionFor(r, dep) {
     var c = (r.category || '').toLowerCase();
     if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Supply $' + fmtInt.format(dep) + ' to ' + r.name + "'s lending market on " + r.farm_chain + ' and keep it supplied.';
@@ -142,11 +152,11 @@
     var hdr = h('header', { 'class': 'hdr' },
       h('div', { 'class': 'topbar' },
         h('span', { 'class': 'logo', text: '◆ TOKEN RADAR' }),
-        h('span', { 'class': 'topmeta', text: 'Snapshot ' + R.as_of + ' · DefiLlama protocol index · radar-4 model' }),
+        h('span', { 'class': 'topmeta', text: 'Snapshot ' + R.as_of + ' · DefiLlama protocol index · radar-5 model' }),
         h('span', { 'class': 'topmeta', text: R.board_size + ' protocols' })),
       h('h1', { text: 'What each unlaunched token would be worth, and whether farming it pays' }),
       h('p', { 'class': 'covline', text: cov.total + '/' + cov.total + ' protocols placed · ' + cov.ranked + '/' + R.watchlist_size + ' watchlist ranked · ' + cov.ranked + ' record no token · ' + cov.already_token + ' already trade · ' + (cov.bridge + cov.staking + cov.exchange + cov.versioned + cov.wrapped) + ' set aside' }),
-      h('p', { 'class': 'modelline', text: 'implied value = sizeCurve(TVL) × growthCarry(7d change) × launchOdds(time with no token) — how it is priced' }),
+      h('p', { 'class': 'modelline', text: 'implied value = sizeCurve(TVL, 7d growth) × launchOdds(time with no token) — how it is priced' }),
       h('p', { 'class': 'farmline', id: 'farmline' })
     );
     app.appendChild(hdr);
@@ -162,6 +172,7 @@
     stats.appendChild(card('LAUNCH ODDS, FITTED', 'π = ' + V.odds.pi.toFixed(2), 'half-life ' + V.odds.half_life_days + ' days · ' + V.odds.dated + ' dated protocols'));
     stats.appendChild(card('WORTH FARMING', String(V.verdicts.farm), V.verdicts.marginal + ' marginal · ' + V.verdicts.skip + ' skip at $1,000 each'));
     app.appendChild(stats);
+    app.appendChild(h('p', { 'class': 'validstrip', text: 'out-of-sample: leave-one-out ×' + V.fit.loo_median.toFixed(2) + ' · time split ×' + V.fit.time_median.toFixed(2) + ' · 900-day split ×' + V.fit.split900_median.toFixed(2) + ' · ' + Math.round(V.fit.within3 * 100) + '% within 3× · flat multiple ×' + V.fit.loo_flat_median.toFixed(2) + ' · launch odds Brier ' + V.odds.loo_brier.toFixed(3) + ' vs ' + V.odds.loo_brier_base.toFixed(3) + ' base rate — every number on this page is computed from the snapshot, not asserted' }));
     var segs = [['ranked', cov.ranked, '#3fae8a'], ['already trade', cov.already_token, '#5b7fa6'], ['bridge', cov.bridge, '#8a6d3b'], ['staking', cov.staking, '#7a5b8a'], ['exchange', cov.exchange, '#6b7c5e'], ['versioned', cov.versioned, '#96505a'], ['wrapped', cov.wrapped, '#5e6b7a']];
     var bar = h('div', { 'class': 'covbar' });
     segs.forEach(function (s) { bar.appendChild(h('div', { 'class': 'seg', style: 'width:' + (s[1] / cov.total * 100).toFixed(2) + '%;background:' + s[2], title: s[0] + ' ' + s[1] })); });
@@ -271,7 +282,7 @@
       });
       lt.appendChild(lb);
       wrap.appendChild(lt);
-      wrap.appendChild(h('p', { 'class': 'note', text: 'Top ' + R.live_size + ' by market cap of the ' + V.coverage.already_token + ' protocols in the snapshot that already trade. They are the comparables the size curve is fitted on, not rows to farm.' }));
+      wrap.appendChild(h('p', { 'class': 'note', text: 'All ' + R.live_size + ' protocols in the snapshot that already trade, by market cap. The ' + V.fit.comps + ' dated ones are the comparables the size curve is fitted on, not rows to farm.' }));
       return;
     }
     var rows = visibleRows();
@@ -288,15 +299,18 @@
     rows.forEach(function (r) {
       var n = netFor(r, S.dep, S.drop, S.tbill);
       var v = verdictOf(n.net);
+      var be = breakEven(r, S.dep, S.drop, S.tbill);
       var row = h('tr', { 'class': 'row', id: 'r-' + r.slug });
       row.onclick = function () { openDetail(r); };
       row.appendChild(h('td', { 'class': 'num rank', text: String(r.rank) }));
-      row.appendChild(h('td', {}, h('span', { 'class': 'pname', text: r.name }), h('span', { 'class': 'pcat', text: ' ' + (r.category || '') + ' · ' + r.chains.join(', ') })));
+      var nameCell = h('td', {}, h('span', { 'class': 'pname', text: r.name }), h('span', { 'class': 'pcat', text: ' ' + (r.category || '') + ' · ' + r.chains.join(', ') }));
+      if (v !== 'SKIP') nameCell.appendChild(h('span', { 'class': 'planline', text: '→ ' + shortPlan(r) + ' · ' + r.farm_chain + ' · net ' + money2(n.net) }));
+      row.appendChild(nameCell);
       row.appendChild(h('td', { 'class': 'num', text: money(r.tvl_usd) }));
       row.appendChild(h('td', { 'class': 'num ' + (r.change_7d === null ? '' : r.change_7d >= 0 ? 'up' : 'dn'), text: pct(r.change_7d) }));
       row.appendChild(h('td', { 'class': 'num', text: ageLabel(r.age_days) }));
       row.appendChild(h('td', { 'class': 'num', text: money(r.if_launched_usd) }));
-      row.appendChild(h('td', { 'class': 'num', text: oddsPct(r.launch_odds) }));
+      row.appendChild(h('td', { 'class': 'num' }, h('div', { text: oddsPct(r.launch_odds) }), h('div', { 'class': 'beodds', text: be === null ? '' : 'BE ' + oddsPct(be) })));
       row.appendChild(h('td', { 'class': 'num strong', text: money(r.implied_value_usd) }));
       row.appendChild(h('td', { 'class': 'num range', text: money(r.range_lo_usd) + '–' + money(r.range_hi_usd) }));
       row.appendChild(h('td', { 'class': 'num ' + (n.net >= 0 ? 'up' : 'dn'), text: money2(n.net) }));
@@ -316,14 +330,19 @@
     function Y(v) { return Hh - pad - (v - y0) / (y1 - y0) * (Hh - 2 * pad); }
     var dots = R.comps.map(function (p) { return '<circle cx="' + X(Math.log10(p.tvl_usd)).toFixed(1) + '" cy="' + Y(Math.log10(p.mcap_usd)).toFixed(1) + '" r="2.2" fill="#5b7fa6" opacity="0.55"/>'; }).join('');
     var f = V.fit;
-    var line = '<line x1="' + X(x0) + '" y1="' + Y(f.intercept + f.slope * x0) + '" x2="' + X(x1) + '" y2="' + Y(f.intercept + f.slope * x1) + '" stroke="#3fae8a" stroke-width="2"/>';
+    var pts = [];
+    for (var i = 0; i <= 40; i++) {
+      var xx = x0 + (x1 - x0) * i / 40;
+      pts.push(X(xx).toFixed(1) + ',' + Y(f.intercept + f.slope * xx + f.quad * xx * xx).toFixed(1));
+    }
+    var line = '<polyline points="' + pts.join(' ') + '" fill="none" stroke="#3fae8a" stroke-width="2"/>';
     var flat = '<line x1="' + X(x0) + '" y1="' + Y(x0 + Math.log10(f.flat_median)) + '" x2="' + X(x1) + '" y2="' + Y(x1 + Math.log10(f.flat_median)) + '" stroke="#96505a" stroke-width="1.5" stroke-dasharray="5 4"/>';
     return '<svg viewBox="0 0 ' + W + ' ' + Hh + '" class="chart">' +
-      '<text x="' + (W / 2) + '" y="16" class="ct" text-anchor="middle">Market cap vs TVL — 128 traded protocols (log scale)</text>' +
+      '<text x="' + (W / 2) + '" y="16" class="ct" text-anchor="middle">Market cap vs TVL — ' + V.fit.comps + ' dated traded protocols (log scale)</text>' +
       '<text x="14" y="' + (Hh / 2) + '" class="ca" transform="rotate(-90 14 ' + (Hh / 2) + ')" text-anchor="middle">log market cap</text>' +
       '<text x="' + (W / 2) + '" y="' + (Hh - 8) + '" class="ca" text-anchor="middle">log TVL</text>' +
       dots + flat + line +
-      '<text x="' + (W - pad - 4) + '" y="' + (Y(f.intercept + f.slope * x1) - 6) + '" class="cl" text-anchor="end">size curve</text>' +
+      '<text x="' + (W - pad - 4) + '" y="' + (Y(f.intercept + f.slope * x1 + f.quad * x1 * x1) - 6) + '" class="cl" text-anchor="end">size curve</text>' +
       '<text x="' + (W - pad - 4) + '" y="' + (Y(x1 + Math.log10(f.flat_median)) + 14) + '" class="cl2" text-anchor="end">flat ×' + f.flat_median.toFixed(2) + '</text>' +
       '</svg>';
   }
@@ -348,28 +367,30 @@
     var f = V.fit;
     var sec = h('section', { 'class': 'oos' },
       h('h2', { text: 'Does it hold on tokens it never saw?' }),
-      h('p', { 'class': 'oos-sub', text: 'Every term is tested twice: leave-one-out across the 128 traded protocols, and a time split that fits on protocols listed before 2024-07-15 and checks the newer ones. A term is kept only if it wins both. Growth is the exception: it loses leave-one-out but wins the time split, so it stays out of the fit and is used as a labelled projection instead.' }));
+      h('p', { 'class': 'oos-sub', text: 'Every term is tested three ways on the ' + V.fit.comps + ' dated traded protocols: leave-one-out, a time split that fits the older half and checks the newer half, and a 900-day split that fits protocols listed at least 900 days ago and checks the younger ones — the board’s own population. A term stays only if adding it to the spec does not lose any of the three tests. The ' + V.fit.excluded_undated + ' traded protocols with no listing date are left out of the fit: legacy products whose token covers other products, with market-cap/TVL ratios from 0.00 to 18.96.' }));
     var grid = h('div', { 'class': 'oos-grid' });
     var left = h('div', { 'class': 'oos-col' });
     var tt = h('table', { 'class': 'mini' });
-    tt.appendChild(h('thead', {}, h('tr', {}, h('th', { text: 'TERM' }), h('th', { 'class': 'num', text: 'LEAVE-ONE-OUT' }), h('th', { 'class': 'num', text: 'TIME SPLIT' }), h('th', { 'class': 'num', text: 'KEPT' }))));
+    tt.appendChild(h('thead', {}, h('tr', {}, h('th', { text: 'TERM' }), h('th', { 'class': 'num', text: 'LEAVE-ONE-OUT' }), h('th', { 'class': 'num', text: 'TIME SPLIT' }), h('th', { 'class': 'num', text: '900-DAY SPLIT' }), h('th', { 'class': 'num', text: 'KEPT' }))));
     var tb = h('tbody', {});
     f.terms.forEach(function (t) {
       tb.appendChild(h('tr', {},
         h('td', { text: t.term }),
         h('td', { 'class': 'num', text: '×' + t.loo_median.toFixed(2) }),
         h('td', { 'class': 'num', text: '×' + t.time_median.toFixed(2) }),
+        h('td', { 'class': 'num', text: '×' + t.split900_median.toFixed(2) }),
         h('td', { 'class': 'num', text: t.kept ? 'yes' : 'no' })));
     });
     tb.appendChild(h('tr', { 'class': 'flatrow' },
       h('td', { text: 'flat median multiple' }),
       h('td', { 'class': 'num', text: '×' + f.loo_flat_median.toFixed(2) }),
       h('td', { 'class': 'num', text: '×' + f.time_flat_median.toFixed(2) }),
+      h('td', { 'class': 'num', text: '×' + f.split900_flat_median.toFixed(2) }),
       h('td', { 'class': 'num', text: 'no' })));
     tt.appendChild(tb);
     left.appendChild(tt);
-    left.appendChild(h('p', { 'class': 'note', text: 'Median miss: the size curve is off by ×' + f.loo_median.toFixed(2) + ' on a token it never saw (flat multiple ×' + f.loo_flat_median.toFixed(2) + '); three quarters of misses are under ×' + f.loo_p75.toFixed(2) + '. The P25–P75 range holds ' + Math.round(f.range_hold * 100) + '% of actual market caps.' }));
-    left.appendChild(h('p', { 'class': 'note', text: 'Launch odds are a survival fit on the ' + V.odds.dated + ' dated protocols that stand alone like the board’s rows — bridges, exchanges and staking products are left out, because their value accrues to a token that already trades. π = ' + V.odds.pi.toFixed(2) + ' ever launch, half-life ' + V.odds.half_life_days + ' days. The time split fits the older cohort and checks the newer one: it overstates the newer cohort’s no-token share by 3–12 points in the 180–365 day bucket — the launch rate is not stationary.' }));
+    left.appendChild(h('p', { 'class': 'note', text: 'Median miss: the size curve is off by ×' + f.loo_median.toFixed(2) + ' on a token it never saw (flat multiple ×' + f.loo_flat_median.toFixed(2) + '); ' + Math.round(f.within3 * 100) + '% of its leave-one-out predictions land within 3× of the actual market cap, and three quarters of misses are under ×' + f.loo_p75.toFixed(2) + '. The P25–P75 range holds ' + Math.round(f.range_hold * 100) + '% of actual market caps.' }));
+    left.appendChild(h('p', { 'class': 'note', text: 'Launch odds are a survival fit on the ' + V.odds.dated + ' dated protocols that stand alone like the board’s rows — bridges, exchanges and staking products are left out, because their value accrues to a token that already trades. π = ' + V.odds.pi.toFixed(2) + ' ever launch, half-life ' + V.odds.half_life_days + ' days. The time split fits the older cohort and checks the newer one: it overstates the newer cohort’s no-token share by up to 9 points in the 180–365 day bucket — the launch rate is not stationary. Held out, the odds score Brier ' + V.odds.loo_brier.toFixed(3) + ' against ' + V.odds.loo_brier_base.toFixed(3) + ' for the base rate; at a 50% threshold they classify no better than guessing “no token” (' + Math.round(V.odds.accuracy * 100) + '% vs ' + Math.round(V.odds.accuracy_base * 100) + '%) — what they add is calibration across ages, shown in the buckets.' }));
     grid.appendChild(left);
     var right = h('div', { 'class': 'oos-col' });
     right.innerHTML = scatterSVG() + oddsBarsSVG();
@@ -383,9 +404,9 @@
     var f = V.fit, o = V.odds;
     var sec = h('section', { 'class': 'model' },
       h('h2', { text: 'How it is priced' }),
-      h('p', { 'class': 'model-formula', text: 'implied value = sizeCurve(TVL) × growthCarry(7d change) × launchOdds(time with no token)' }),
-      h('p', { 'class': 'model-note', text: 'sizeCurve is the log-log fit on ' + f.comps + ' traded protocols: log₁₀(market cap) = ' + f.intercept.toFixed(3) + ' + ' + f.slope.toFixed(3) + ' × log₁₀(TVL). The flat median multiple is ' + f.flat_median.toFixed(3) + ' — it misses by ×' + f.loo_flat_median.toFixed(2) + ' where the curve misses by ×' + f.loo_median.toFixed(2) + '.' }),
-      h('p', { 'class': 'model-note', text: 'growthCarry = 1 + (7d change − market ' + f.market_growth.toFixed(2) + '%) / 100, clamped to [0.30, 5.00]. It is a projection, not a fit: 7-day growth inside the fit loses leave-one-out (×' + f.terms[1].loo_median.toFixed(2) + ' vs ×' + f.loo_median.toFixed(2) + ').' }),
+      h('p', { 'class': 'model-formula', text: 'implied value = sizeCurve(TVL, 7d growth) × launchOdds(time with no token)' }),
+      h('p', { 'class': 'model-note', text: 'sizeCurve is the quadratic log-log fit on ' + f.comps + ' dated traded protocols: log₁₀(market cap) = ' + f.intercept.toFixed(3) + ' + ' + f.slope.toFixed(3) + ' × log₁₀(TVL) + ' + f.quad.toFixed(3) + ' × log₁₀(TVL)² + ' + f.growth_coef.toFixed(3) + ' × log₁₀(1 + 7d change). The flat median multiple is ' + f.flat_median.toFixed(3) + ' — it misses by ×' + f.loo_flat_median.toFixed(2) + ' where the curve misses by ×' + f.loo_median.toFixed(2) + '.' }),
+      h('p', { 'class': 'model-note', text: 'The 7-day growth coefficient is negative: a TVL surge prices a token down, not up — the surge is usually deposits chasing yield, not a re-rating. The growth feature is winsorized to the range the comparables show (7d change ' + Math.round((10 ** f.growth_feat_lo - 1) * 100) + '% to +' + Math.round((10 ** f.growth_feat_hi - 1) * 100) + '%): a board row outside that range is priced as if it were at the edge, never extrapolated. The ' + f.excluded_undated + ' traded protocols with no listing date are left out of the fit entirely — legacy products whose token covers other products.' }),
       h('p', { 'class': 'model-note', text: 'launchOdds comes from a survival model: a fraction π = ' + o.pi.toFixed(2) + ' of protocols ever launch, launchers launch with a constant hazard, half-life ' + o.half_life_days + ' days. At 30 days the odds are 52%, at 4 years 26%. A protocol with no listed date takes π.' }),
       h('p', { 'class': 'model-note', text: 'The farm verdict is costed at a $' + fmtInt.format(S.dep) + ' deposit, a ' + Math.round(S.drop * 100) + '% drop share and a ' + Math.round(S.tbill * 100) + '% T-bill yield: slice = drop share × if launched × deposit / TVL, expected = slice × odds, fees = (4 + ceil(hold / 14)) × gas ($' + M.gas_cheap_usd.toFixed(2) + ' a transaction off Ethereum, $' + M.gas_ethereum_usd.toFixed(2) + ' on it, cheapest chain), T-bill cost = yield × deposit × hold / 365. FARM means net ≥ $' + M.farm_threshold_usd + '; MARGINAL means net above $0; the rest are SKIP. Hold is 45 days under 6 months old, 60 days under 18 months, 90 days older.' }),
       h('p', { 'class': 'model-note', text: 'What the model does not do: it cannot see a protocol’s team, its token design, or whether a drop will happen at all. The odds are a population rate, not a promise for any one row. Values are model estimates, not prices.' }));
@@ -416,7 +437,7 @@
     inner.appendChild(h('table', { 'class': 'mini why' },
       h('tbody', {},
         h('tr', {}, h('td', { text: 'TVL ' + money(r.tvl_usd) + ' through the size curve' }), h('td', { 'class': 'num', text: money(base) })),
-        h('tr', {}, h('td', { text: '× growth carry ' + r.growth_carry.toFixed(2) + ' (' + pct(r.change_7d === null ? 0 : r.change_7d) + ' vs market ' + V.fit.market_growth.toFixed(1) + '%)' }), h('td', { 'class': 'num', text: '= ' + money(r.if_launched_usd) + ' if launched' })),
+        h('tr', {}, h('td', { text: '× growth factor ' + r.growth_carry.toFixed(2) + ' (7d ' + pct(r.change_7d === null ? 0 : r.change_7d) + '; the fit prices surges down, winsorized to the comparables’ range)' }), h('td', { 'class': 'num', text: '= ' + money(r.if_launched_usd) + ' if launched' })),
         h('tr', {}, h('td', { text: '× launch odds ' + oddsPct(r.launch_odds) + ' (' + ageLabel(r.age_days) + ' with no token)' }), h('td', { 'class': 'num', text: '= ' + money(r.implied_value_usd) })),
         h('tr', {}, h('td', { text: 'P25–P75 range, from leave-one-out residuals' }), h('td', { 'class': 'num', text: money(r.range_lo_usd) + ' – ' + money(r.range_hi_usd) })))));
     inner.appendChild(h('h3', { text: 'Farm plan — $' + fmtInt.format(S.dep) + ' on ' + r.farm_chain }));

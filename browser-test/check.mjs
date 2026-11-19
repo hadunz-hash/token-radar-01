@@ -1,4 +1,4 @@
-// Independent page checks for token-radar v4: renders without errors, the
+// Independent page checks for token-radar v5: renders without errors, the
 // board shows 198 rows, and the page's farm plan + net mirror lib/model.ts
 // (reimplemented here from the model rules, not copied from app.js).
 import { chromium } from 'playwright-core';
@@ -79,9 +79,13 @@ try {
   const rows = await page.$$eval('#boardwrap tbody tr', (els) => els.length);
   check('board renders 198 rows', rows === 198, rows + ' rows');
   const farmline = await page.$eval('#farmline', (el) => el.textContent);
-  check('farmline names top farms', farmline.includes('Monolith Market') && farmline.includes('NUVA') && farmline.includes('Shift DeFi'), farmline.slice(0, 120));
+  check('farmline names top farms', farmline.includes('Nucleus') && farmline.includes('Monarq') && farmline.includes('DAMM Capital'), farmline.slice(0, 120));
   const stats = await page.$$eval('.stat-v', (els) => els.map((e) => e.textContent));
-  check('stat cards', stats[0] === '198' && stats[1] === '$1.08B' && stats[4] === 'π = 0.53' && stats[5] === '24', JSON.stringify(stats));
+  check('stat cards', stats[0] === '198' && stats[1] === '$775.6M' && stats[4] === 'π = 0.53' && stats[5] === '27', JSON.stringify(stats));
+  const strip = await page.$eval('.validstrip', (el) => el.textContent);
+  check('validation strip shows LOO x2.83', strip.includes('×2.83') && strip.includes('×2.61') && strip.includes('×2.88') && strip.includes('51% within 3×'), strip.slice(0, 140));
+  const planlines = await page.$$eval('#boardwrap tbody tr .planline', (els) => els.length);
+  check('plan lines on farm/marginal rows', planlines === 27 + 63, planlines + ' plan lines');
   const svgCount = await page.$$eval('svg.chart', (els) => els.length);
   check('two charts render', svgCount === 2, svgCount + ' svg');
 
@@ -114,10 +118,10 @@ try {
   // what-if: deposit $5,000 changes the top FARM net, Farm filter shows 24 at $1,000
   await page.goto(base, { waitUntil: 'networkidle' });
   await page.waitForTimeout(500);
-  await page.locator('button.pill', { hasText: 'Farm 24' }).click();
+  await page.locator('button.pill', { hasText: 'Farm 27' }).click();
   await page.waitForTimeout(400);
   const farmRows = await page.$$eval('#boardwrap tbody tr', (els) => els.length);
-  check('Farm filter shows 24 rows', farmRows === 24, farmRows + ' rows');
+  check('Farm filter shows 27 rows', farmRows === 27, farmRows + ' rows');
   await page.locator('button.pill', { hasText: 'Any verdict' }).click();
   await page.waitForTimeout(300);
   await page.locator('button.pill', { hasText: '$5,000' }).click();
@@ -125,11 +129,11 @@ try {
   const net5k = await page.$eval('#boardwrap tbody tr:first-child td:nth-child(10)', (el) => el.innerText);
   check('deposit toggle recomputes net', net5k !== '', 'first row net at $5k: ' + net5k);
 
-  // live tab (capped at the top 24 by market cap)
+  // live tab (all 402 traded protocols, by market cap)
   await page.locator('button.tab', { hasText: 'Already trade' }).click();
   await page.waitForTimeout(400);
   const liveRows = await page.$$eval('#boardwrap tbody tr', (els) => els.length);
-  check('live tab shows top 24 rows', liveRows === 24, liveRows + ' rows');
+  check('live tab shows all 402 rows', liveRows === 402, liveRows + ' rows');
 
   check('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 } finally {
