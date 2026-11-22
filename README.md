@@ -4,9 +4,9 @@
 [![rank](https://make.fun/badge/token-radar-01/hadunz-hash/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/hadunz-hash/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-Token launch radar: ranks pre-token DeFi protocols by an implied value calibrated on the snapshot's own live-token FDV/TVL, with a concrete farm plan for each — a dark, sortable, filterable dashboard with a detail view per protocol.
+A radar for token launches: it prices pre-token DeFi protocols by an implied value fitted on the snapshot's own live-token market caps, and costs out a farm plan for each one — shown on a dark, sortable, filterable dashboard with a detail view per protocol.
 
-Entry for make.fun's `token-radar-01`: read a sealed snapshot of every protocol DefiLlama tracks, find the ones that record no token, rank them by what their launch would be worth, and hand in a web dashboard that shows the board, a detail view for each protocol and the steps to farm it.
+This is an entry for make.fun's `token-radar-01`: take a sealed snapshot of every protocol DefiLlama tracks, pick out the ones that record no token, rank them by what their launch would be worth, and ship a web dashboard with the board, a detail view for each protocol and the steps to farm it.
 
 ## Run it
 
@@ -14,25 +14,25 @@ Entry for make.fun's `token-radar-01`: read a sealed snapshot of every protocol 
 MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
 ```
 
-`main.ts` (Node 22, standard library only) reads `/input/snapshot.json`, scores every pre-token protocol with the model in `lib/model.ts`, writes the ranked board to `/output/board.json`, writes the dashboard's data beside it as `data.js`, copies `dashboard/` and `screenshots/` to `/output`, and writes `/output/dossier.json` with the vendored make.fun library.
+`main.ts` (Node 22, stdlib only) loads `/input/snapshot.json`, prices every pre-token protocol with the model in `lib/model.ts`, writes the ranked board to `/output/board.json` and the dashboard's data beside it as `data.js`, copies `dashboard/` and `screenshots/` into `/output`, and writes `/output/dossier.json` through the vendored make.fun library.
 
 ## How it works
 
-Implied value follows only from the snapshot's own figures:
+The implied value comes only from the snapshot's own numbers, through a fitted curve:
 
 ```
-implied = round( tvl_usd x multiple(category) x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
-                 x (0.6 + min(age_days, 1095) / 1095 x 0.4) )
+log10(mcap) = a + b·log10(TVL) + c·log10(TVL)² + d·log10(1 + 7d change)
+implied     = round( 10^log10(mcap) × launchOdds )
 ```
 
-The multiple is not a constant: it is the FDV/TVL the market itself pays, read off the snapshot's live-token protocols. Each category's median is shrunk toward the global median (weight 10) and clamped to [0.05, 0.50]; a category with fewer than 5 live tokens uses the global median. Age is the time since the protocol was first listed, the best record of how long it has run with no token. No protocol name is ever special-cased: the same function scores every row.
+The coefficients are fitted by least squares on the snapshot's own dated traded protocols — nothing is hand-picked. The 7-day growth term is winsorized to the range the comparables show, so no row is priced on growth the data has never seen. Launch odds come from a survival fit on dated standalone protocols: a share π ever launches, and launchers arrive with a constant hazard. Age is the time since the protocol was first listed, the best record of how long it has run with no token. No protocol name is ever special-cased: one function scores every row.
 
-The board covers all 40 watchlist protocols and adds 186 pre-token protocols below the $50M floor, by TVL. Live-token protocols are set aside with their market caps shown, and their FDV/TVL ratios calibrate the multiples. Each row carries a six-step farm plan derived from the protocol's own record (category, chains, TVL, age), with a cost and a time for every step.
+The board ranks all 40 watchlist protocols and adds the pre-token protocols the watchlist leaves out, by TVL. Live-token protocols are set aside with their market caps shown, and their FDV/TVL ratios are the comparables the curve is fitted on. Each row carries a six-step farm plan derived from the protocol's own record (category, chains, TVL, age), with a cost and a time for every step.
 
 ## Files
 
-- `main.ts` — the entry (stdlib only, deterministic, offline)
-- `lib/model.ts` — the model: calibration, ranking, farm plans
+- `main.ts` — the runner (stdlib only, deterministic, offline)
+- `lib/model.ts` — the model: the fitted curve, the odds, the ranking, the farm plans
 - `vendor/makefun-board.ts` — make.fun's dossier library (vendored as-is)
 - `dashboard/` — the static page: `index.html`, `app.css`, `app.js` (no network)
 - `screenshots/` — the board, a protocol's detail view and a filtered view
